@@ -1647,8 +1647,8 @@ static int shape_text_hb(DrawTextContext *s, HarfbuzzData* hb, const char* text,
         return AVERROR(ENOMEM);
     }
     hb_ft_font_set_funcs(hb->font);
-    hb_buffer_add_utf8(hb->buf, text, strlen(text), 0, -1);
-    printf("strlen(%d), textLen:(%d)\n", strlen(text), textLen);
+    hb_buffer_add_utf8(hb->buf, text, textLen, 0, -1);
+    // printf("strlen(%ld), textLen:(%d)\n", strlen(text), textLen);
     hb_shape(hb->font, hb->buf, NULL, 0);
     hb->glyph_info = hb_buffer_get_glyph_infos(hb->buf, &hb->glyph_count);
     hb->glyph_pos = hb_buffer_get_glyph_positions(hb->buf, &hb->glyph_count);
@@ -1728,8 +1728,11 @@ continue_on_failed:
             s->tab_clusters[tab_idx++] = i;
             *p = ' ';
         }
+        char* last_p;
+        last_p = p;
         GET_UTF8(code, *p ? *p++ : 0, code = 0xfffd; goto continue_on_failed2;);
 continue_on_failed2:
+        // av_log(ctx, AV_LOG_DEBUG, "dist:%d\n", p - last_p);
         if (is_newline(code) || code == 0) {
             TextLine *cur_line = &s->lines[line_count];
             HarfbuzzData *hb = &cur_line->hb_data;
@@ -1799,7 +1802,7 @@ continue_on_failed2:
         }
 
         if (code == 0) break;
-        ++num_chars;
+        num_chars += (int)(p - last_p);
     }
 
     metrics->line_height64 = s->face->size->metrics.height;
