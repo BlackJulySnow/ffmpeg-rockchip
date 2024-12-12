@@ -1682,6 +1682,7 @@ static int measure_text(AVFilterContext *ctx, TextMetrics *metrics)
 
     int i, tab_idx = 0, last_tab_idx = 0, line_offset = 0;
     char* p;
+    char* last_p;
     int ret = 0;
 
     // Count the lines and the tab characters
@@ -1728,7 +1729,7 @@ continue_on_failed:
             s->tab_clusters[tab_idx++] = i;
             *p = ' ';
         }
-        char* last_p;
+        
         last_p = p;
         GET_UTF8(code, *p ? *p++ : 0, code = 0xfffd; goto continue_on_failed2;);
 continue_on_failed2:
