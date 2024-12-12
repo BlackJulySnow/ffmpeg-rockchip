@@ -1647,7 +1647,8 @@ static int shape_text_hb(DrawTextContext *s, HarfbuzzData* hb, const char* text,
         return AVERROR(ENOMEM);
     }
     hb_ft_font_set_funcs(hb->font);
-    hb_buffer_add_utf8(hb->buf, text, textLen, 0, -1);
+    hb_buffer_add_utf8(hb->buf, text, strlen(text), 0, -1);
+    printf("strlen(%d), textLen:(%d)\n", strlen(text), textLen);
     hb_shape(hb->font, hb->buf, NULL, 0);
     hb->glyph_info = hb_buffer_get_glyph_infos(hb->buf, &hb->glyph_count);
     hb->glyph_pos = hb_buffer_get_glyph_positions(hb->buf, &hb->glyph_count);
