@@ -148,7 +148,6 @@ static av_cold int rkmpp_decode_close(AVCodecContext *avctx)
     r->eof = 0;
     r->draining = 0;
     r->info_change = 0;
-    r->errinfo_cnt = 0;
     r->got_frame = 0;
     r->use_rfbc = 0;
 
@@ -201,6 +200,7 @@ static av_cold int rkmpp_decode_init(AVCodecContext *avctx)
             avctx->codec_id == AV_CODEC_ID_AV1;
         break;
     case AV_PIX_FMT_YUV422P:
+    case AV_PIX_FMT_YUVJ422P:
         pix_fmts[1] = AV_PIX_FMT_NV16;
         is_fmt_supported =
             avctx->codec_id == AV_CODEC_ID_H264;
@@ -211,6 +211,7 @@ static av_cold int rkmpp_decode_init(AVCodecContext *avctx)
             avctx->codec_id == AV_CODEC_ID_H264;
         break;
     case AV_PIX_FMT_YUV444P:
+    case AV_PIX_FMT_YUVJ444P:
         pix_fmts[1] = AV_PIX_FMT_NV24;
         is_fmt_supported =
             avctx->codec_id == AV_CODEC_ID_HEVC;
@@ -322,13 +323,16 @@ static av_cold int rkmpp_decode_init(AVCodecContext *avctx)
     }
 
     if (avctx->hw_device_ctx) {
-        r->hwdevice = av_buffer_ref(avctx->hw_device_ctx);
-        if (!r->hwdevice) {
-            ret = AVERROR(ENOMEM);
-            goto fail;
+        AVBufferRef *device_ref = avctx->hw_device_ctx;
+        AVHWDeviceContext *device_ctx = (AVHWDeviceContext *)device_ref->data;
+
+        if (device_ctx && device_ctx->type == AV_HWDEVICE_TYPE_RKMPP) {
+            r->hwdevice = av_buffer_ref(avctx->hw_device_ctx);
+            if (r->hwdevice)
+                av_log(avctx, AV_LOG_VERBOSE, "Picked up an existing RKMPP hardware device\n");
         }
-        av_log(avctx, AV_LOG_VERBOSE, "Picked up an existing RKMPP hardware device\n");
-    } else {
+    }
+    if (!r->hwdevice) {
         if ((ret = av_hwdevice_ctx_create(&r->hwdevice, AV_HWDEVICE_TYPE_RKMPP, NULL, NULL, 0)) < 0) {
             av_log(avctx, AV_LOG_ERROR, "Failed to create a RKMPP hardware device: %d\n", ret);
             goto fail;
@@ -751,7 +755,7 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
     }
     if (mpp_frame_get_errinfo(mpp_frame)) {
         av_log(avctx, AV_LOG_DEBUG, "Received a 'errinfo' frame\n");
-        ret = (r->errinfo_cnt++ > MAX_ERRINFO_COUNT) ? AVERROR_EXTERNAL : AVERROR(EAGAIN);
+        ret = AVERROR(EAGAIN);
         goto exit;
     }
 
@@ -824,7 +828,6 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
         goto exit;
     } else {
         av_log(avctx, AV_LOG_DEBUG, "Received a frame\n");
-        r->errinfo_cnt = 0;
         r->got_frame = 1;
 
         switch (avctx->pix_fmt) {
@@ -1014,7 +1017,6 @@ static void rkmpp_decode_flush(AVCodecContext *avctx)
         r->eof = 0;
         r->draining = 0;
         r->info_change = 0;
-        r->errinfo_cnt = 0;
         r->got_frame = 0;
 
         av_packet_unref(&r->last_pkt);
@@ -1026,10 +1028,10 @@ static void rkmpp_decode_flush(AVCodecContext *avctx)
 DEFINE_RKMPP_DECODER(h263, H263, NULL)
 #endif
 #if CONFIG_H264_RKMPP_DECODER
-DEFINE_RKMPP_DECODER(h264, H264, "h264_mp4toannexb,dump_extra")
+DEFINE_RKMPP_DECODER(h264, H264, "h264_mp4toannexb")
 #endif
 #if CONFIG_HEVC_RKMPP_DECODER
-DEFINE_RKMPP_DECODER(hevc, HEVC, "hevc_mp4toannexb,dump_extra")
+DEFINE_RKMPP_DECODER(hevc, HEVC, "hevc_mp4toannexb")
 #endif
 #if CONFIG_VP8_RKMPP_DECODER
 DEFINE_RKMPP_DECODER(vp8, VP8, NULL)
