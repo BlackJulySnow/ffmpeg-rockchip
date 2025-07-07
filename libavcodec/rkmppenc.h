@@ -37,6 +37,7 @@
 #include "libavutil/hwcontext_rkmpp.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/uuid.h"
 
 #define H26X_HEADER_SIZE   1024
 #define H26X_ASYNC_FRAMES  4
@@ -46,6 +47,7 @@
 typedef struct MPPEncFrame {
     AVFrame            *frame;
     MppFrame            mpp_frame;
+    MppEncUserDataSet   mpp_sei_set;
     struct MPPEncFrame *next;
     int                 queued;
 } MPPEncFrame;
@@ -78,6 +80,9 @@ typedef struct RKMPPEncContext {
     int                level;
     int                coder;
     int                dct8x8;
+    int                udu_sei;
+    int                prefix_mode;
+    int                chroma_fmt;
 } RKMPPEncContext;
 
 static const AVRational mpp_tb = { 1, 1000000 };
@@ -143,6 +148,10 @@ static const AVOption h264_options[] = {
         { "cabac", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, INT_MIN, INT_MAX, VE, "coder" },
     { "8x8dct", "Set the high profile 8x8 transform", OFFSET(dct8x8), AV_OPT_TYPE_BOOL,
             { .i64 = 1 }, 0, 1, VE, "8x8dct" },
+    { "udu_sei", "Pass on user data unregistered SEI if available", OFFSET(udu_sei), AV_OPT_TYPE_BOOL,
+            { .i64 = 0 }, 0, 1, VE, "udu_sei" },
+    { "prefix_mode", "Add prefix NAL between SEI info and encoded bitstream data", OFFSET(prefix_mode), AV_OPT_TYPE_BOOL,
+            { .i64 = 0 }, 0, 1, VE, "prefix_mode" },
     { NULL },
 };
 
@@ -170,6 +179,8 @@ static const AVOption hevc_options[] = {
         { "6",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 180 }, 0, 0, VE, "level" },
         { "6.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 183 }, 0, 0, VE, "level" },
         { "6.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 186 }, 0, 0, VE, "level" },
+    { "udu_sei", "Pass on user data unregistered SEI if available", OFFSET(udu_sei), AV_OPT_TYPE_BOOL,
+            { .i64 = 0 }, 0, 1, VE, "udu_sei" },
     { NULL },
 };
 
@@ -180,6 +191,13 @@ static const AVOption mjpeg_options[] = {
             { .i64 = -1 }, -1, 99, VE, "qp_max" }, \
     { "qp_min", "Set the min QP/Q_Factor value", OFFSET(qp_min), AV_OPT_TYPE_INT, \
             { .i64 = -1 }, -1, 99, VE, "qp_min" }, \
+    { "chroma_fmt", "Specify the output chroma format for down subsampling", OFFSET(chroma_fmt), AV_OPT_TYPE_INT, \
+            { .i64 = MPP_CHROMA_UNSPECIFIED }, -1, MPP_CHROMA_444, VE, "chroma_fmt" }, \
+        { "auto", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = -1 }, 0, 0, VE, "chroma_fmt" },
+        { "400",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_400 }, 0, 0, VE, "chroma_fmt" },
+        { "420",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_420 }, 0, 0, VE, "chroma_fmt" },
+        { "422",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_422 }, 0, 0, VE, "chroma_fmt" },
+        { "444",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_444 }, 0, 0, VE, "chroma_fmt" },
     { NULL },
 };
 
@@ -215,9 +233,19 @@ static const enum AVPixelFormat rkmpp_enc_pix_fmts_h26x[] = {
 static const enum AVPixelFormat rkmpp_enc_pix_fmts_mjpeg[] = {
     AV_PIX_FMT_YUV420P,
     AV_PIX_FMT_YUVJ420P,
+    AV_PIX_FMT_YUV422P,  /* RK3576+ only */
+    AV_PIX_FMT_YUVJ422P,
+    AV_PIX_FMT_YUV444P,  /* RK3576+ only */
+    AV_PIX_FMT_YUVJ444P,
     AV_PIX_FMT_NV12,
+    AV_PIX_FMT_NV21,     /* RK3576+ only */
+    AV_PIX_FMT_NV16,     /* RK3576+ only */
+    AV_PIX_FMT_NV24,     /* RK3576+ only */
     AV_PIX_FMT_YUYV422,
     AV_PIX_FMT_UYVY422,
+    AV_PIX_FMT_YVYU422,  /* RK3576+ only */
+
+    /* RGB: pre-RK3576 only */
     AV_PIX_FMT_RGB444BE,
     AV_PIX_FMT_BGR444BE,
     AV_PIX_FMT_RGB555BE,

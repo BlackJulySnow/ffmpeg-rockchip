@@ -73,9 +73,19 @@ static MppFrameFormat rkmpp_get_mpp_fmt_mjpeg(enum AVPixelFormat pix_fmt)
     switch (pix_fmt) {
     case AV_PIX_FMT_YUVJ420P:
     case AV_PIX_FMT_YUV420P:   return MPP_FMT_YUV420P;
+    case AV_PIX_FMT_YUVJ422P:
+    case AV_PIX_FMT_YUV422P:   return MPP_FMT_YUV422P;     /* RK3576+ only */
+    case AV_PIX_FMT_YUVJ444P:
+    case AV_PIX_FMT_YUV444P:   return MPP_FMT_YUV444P;     /* RK3576+ only */
     case AV_PIX_FMT_NV12:      return MPP_FMT_YUV420SP;
+    case AV_PIX_FMT_NV21:      return MPP_FMT_YUV420SP_VU; /* RK3576+ only */
+    case AV_PIX_FMT_NV16:      return MPP_FMT_YUV422SP;    /* RK3576+ only */
+    case AV_PIX_FMT_NV24:      return MPP_FMT_YUV444SP;    /* RK3576+ only */
     case AV_PIX_FMT_YUYV422:   return MPP_FMT_YUV422_YUYV;
     case AV_PIX_FMT_UYVY422:   return MPP_FMT_YUV422_UYVY;
+    case AV_PIX_FMT_YVYU422:   return MPP_FMT_YUV422_YVYU; /* RK3576+ only */
+
+    /* RGB: pre-RK3576 only */
     case AV_PIX_FMT_RGB444BE:  return MPP_FMT_RGB444;
     case AV_PIX_FMT_BGR444BE:  return MPP_FMT_BGR444;
     case AV_PIX_FMT_RGB555BE:  return MPP_FMT_RGB555;
@@ -102,6 +112,38 @@ static uint32_t rkmpp_get_drm_afbc_format(MppFrameFormat mpp_fmt)
     case MPP_FMT_YUV420SP: return DRM_FORMAT_YUV420_8BIT;
     case MPP_FMT_YUV422SP: return DRM_FORMAT_YUYV;
     default:               return DRM_FORMAT_INVALID;
+    }
+}
+
+static MppFrameChromaFormat rkmpp_fix_chroma_fmt(int chroma_fmt,
+                                                 enum AVPixelFormat pix_fmt)
+{
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(pix_fmt);
+    int log2_chroma_sum = desc->log2_chroma_w + desc->log2_chroma_h;
+    int is_yuv = !(desc->flags & AV_PIX_FMT_FLAG_RGB) &&
+                 desc->nb_components >= 2;
+
+    if (!is_yuv)
+        return MPP_CHROMA_UNSPECIFIED;
+
+    switch (chroma_fmt) {
+    case -1:
+        return log2_chroma_sum == 0 ? MPP_CHROMA_444 :
+               log2_chroma_sum == 1 ? MPP_CHROMA_422 :
+                                      MPP_CHROMA_UNSPECIFIED;
+    case MPP_CHROMA_400:
+        return chroma_fmt;
+    case MPP_CHROMA_420:
+        return log2_chroma_sum <= 2 ?
+            chroma_fmt : MPP_CHROMA_UNSPECIFIED;
+    case MPP_CHROMA_422:
+        return log2_chroma_sum <= 1 ?
+            chroma_fmt : MPP_CHROMA_UNSPECIFIED;
+    case MPP_CHROMA_444:
+        return log2_chroma_sum == 0 ?
+            chroma_fmt : MPP_CHROMA_UNSPECIFIED;
+    default:
+        return MPP_CHROMA_UNSPECIFIED;
     }
 }
 
@@ -182,6 +224,9 @@ static void clear_unused_frames(MPPEncFrame *list)
                 mpp_frame_deinit(&list->mpp_frame);
                 list->mpp_frame = NULL;
 
+                av_freep(&list->mpp_sei_set.datas);
+                list->mpp_sei_set.count = 0;
+
                 av_frame_free(&list->frame);
                 list->queued = 0;
             }
@@ -210,6 +255,9 @@ static void clear_frame_list(MPPEncFrame **list)
             mpp_frame_deinit(&frame->mpp_frame);
             frame->mpp_frame = NULL;
         }
+
+        av_freep(&frame->mpp_sei_set.datas);
+        frame->mpp_sei_set.count = 0;
 
         av_frame_free(&frame->frame);
         av_freep(&frame);
@@ -293,7 +341,11 @@ static int rkmpp_set_enc_cfg_prep(AVCodecContext *avctx, AVFrame *frame)
     mpp_enc_cfg_set_s32(cfg, "prep:width", avctx->width);
     mpp_enc_cfg_set_s32(cfg, "prep:height", avctx->height);
 
-    mpp_enc_cfg_set_s32(cfg, "prep:colorspace", avctx->colorspace);
+    if (pix_desc->flags & AV_PIX_FMT_FLAG_RGB) /* RGB -> BT709 CSC */
+        mpp_enc_cfg_set_s32(cfg, "prep:colorspace", AVCOL_SPC_BT709);
+    else
+        mpp_enc_cfg_set_s32(cfg, "prep:colorspace", avctx->colorspace);
+
     mpp_enc_cfg_set_s32(cfg, "prep:colorprim", avctx->color_primaries);
     mpp_enc_cfg_set_s32(cfg, "prep:colortrc", avctx->color_trc);
 
@@ -302,6 +354,12 @@ static int rkmpp_set_enc_cfg_prep(AVCodecContext *avctx, AVFrame *frame)
         r->pix_fmt == AV_PIX_FMT_YUVJ422P ||
         r->pix_fmt == AV_PIX_FMT_YUVJ444P) {
         mpp_enc_cfg_set_s32(cfg, "prep:colorrange", AVCOL_RANGE_JPEG);
+    }
+
+    if (avctx->codec_id == AV_CODEC_ID_MJPEG) {
+        /* always output full range if the MJPEG encoder supports CSC */
+        mpp_enc_cfg_set_s32(cfg, "prep:range_out", AVCOL_RANGE_JPEG);
+        mpp_enc_cfg_set_s32(cfg, "prep:format_out", rkmpp_fix_chroma_fmt(r->chroma_fmt, r->pix_fmt));
     }
 
     if (is_afbc) {
@@ -334,7 +392,7 @@ static int rkmpp_set_enc_cfg(AVCodecContext *avctx)
 {
     RKMPPEncContext *r = avctx->priv_data;
     MppEncCfg cfg = r->mcfg;
-
+    const AVPixFmtDescriptor *pix_desc;
     RK_U32 rc_mode, fps_num, fps_den;
     MppEncHeaderMode header_mode;
     MppEncSeiMode sei_mode;
@@ -346,10 +404,32 @@ static int rkmpp_set_enc_cfg(AVCodecContext *avctx)
     mpp_enc_cfg_set_s32(cfg, "prep:height", avctx->height);
     mpp_enc_cfg_set_s32(cfg, "prep:hor_stride", FFALIGN(avctx->width, 64));
     mpp_enc_cfg_set_s32(cfg, "prep:ver_stride", FFALIGN(avctx->height, 64));
-    mpp_enc_cfg_set_s32(cfg, "prep:format", MPP_FMT_YUV420SP);
+    mpp_enc_cfg_set_s32(cfg, "prep:format", r->mpp_fmt);
     mpp_enc_cfg_set_s32(cfg, "prep:mirroring", 0);
     mpp_enc_cfg_set_s32(cfg, "prep:rotation", 0);
     mpp_enc_cfg_set_s32(cfg, "prep:flip", 0);
+
+    pix_desc = av_pix_fmt_desc_get(r->pix_fmt);
+    if (pix_desc->flags & AV_PIX_FMT_FLAG_RGB) /* RGB -> BT709 CSC */
+        mpp_enc_cfg_set_s32(cfg, "prep:colorspace", AVCOL_SPC_BT709);
+    else
+        mpp_enc_cfg_set_s32(cfg, "prep:colorspace", avctx->colorspace);
+
+    mpp_enc_cfg_set_s32(cfg, "prep:colorprim", avctx->color_primaries);
+    mpp_enc_cfg_set_s32(cfg, "prep:colortrc", avctx->color_trc);
+
+    mpp_enc_cfg_set_s32(cfg, "prep:colorrange", avctx->color_range);
+    if (r->pix_fmt == AV_PIX_FMT_YUVJ420P ||
+        r->pix_fmt == AV_PIX_FMT_YUVJ422P ||
+        r->pix_fmt == AV_PIX_FMT_YUVJ444P) {
+        mpp_enc_cfg_set_s32(cfg, "prep:colorrange", AVCOL_RANGE_JPEG);
+    }
+
+    if (avctx->codec_id == AV_CODEC_ID_MJPEG) {
+        /* always output full range if the MJPEG encoder supports CSC */
+        mpp_enc_cfg_set_s32(cfg, "prep:range_out", AVCOL_RANGE_JPEG);
+        mpp_enc_cfg_set_s32(cfg, "prep:format_out", rkmpp_fix_chroma_fmt(r->chroma_fmt, r->pix_fmt));
+    }
 
     if (avctx->framerate.den > 0 && avctx->framerate.num > 0)
         av_reduce(&fps_num, &fps_den, avctx->framerate.num, avctx->framerate.den, 65535);
@@ -492,6 +572,8 @@ static int rkmpp_set_enc_cfg(AVCodecContext *avctx)
             mpp_enc_cfg_set_s32(cfg, "h264:trans8x8",
                                 (r->dct8x8 && avctx->profile == AV_PROFILE_H264_HIGH));
 
+            mpp_enc_cfg_set_s32(cfg, "h264:prefix_mode", r->prefix_mode);
+
             switch (avctx->profile) {
             case AV_PROFILE_H264_BASELINE:
                 av_log(avctx, AV_LOG_VERBOSE, "Profile is set to BASELINE\n"); break;
@@ -541,7 +623,7 @@ static int rkmpp_set_enc_cfg(AVCodecContext *avctx)
 
     if (avctx->codec_id == AV_CODEC_ID_H264 ||
         avctx->codec_id == AV_CODEC_ID_HEVC) {
-        sei_mode = MPP_ENC_SEI_MODE_DISABLE;
+        sei_mode = r->udu_sei ? MPP_ENC_SEI_MODE_ONE_FRAME : MPP_ENC_SEI_MODE_DISABLE;
         if ((ret = r->mapi->control(r->mctx, MPP_ENC_SET_SEI_CFG, &sei_mode)) != MPP_OK) {
             av_log(avctx, AV_LOG_ERROR, "Failed to set SEI config: %d\n", ret);
             return AVERROR_EXTERNAL;
@@ -551,6 +633,65 @@ static int rkmpp_set_enc_cfg(AVCodecContext *avctx)
                       ? MPP_ENC_HEADER_MODE_DEFAULT : MPP_ENC_HEADER_MODE_EACH_IDR;
         if ((ret = r->mapi->control(r->mctx, MPP_ENC_SET_HEADER_MODE, &header_mode)) != MPP_OK) {
             av_log(avctx, AV_LOG_ERROR, "Failed to set header mode: %d\n", ret);
+            return AVERROR_EXTERNAL;
+        }
+    }
+
+    return 0;
+}
+
+static int rkmpp_prepare_udu_sei_data(AVCodecContext *avctx, MPPEncFrame *mpp_enc_frame)
+{
+    int i, ret, sei_count = 0;
+
+    if (!mpp_enc_frame ||
+        !mpp_enc_frame->frame ||
+        !mpp_enc_frame->mpp_frame)
+        return AVERROR(EINVAL);
+
+    /* user data unregistered SEI of H26X */
+    for (i = 0; i < mpp_enc_frame->frame->nb_side_data; i++) {
+        MppEncUserDataSet *mpp_sei_set = &mpp_enc_frame->mpp_sei_set;
+        AVFrameSideData *sd = mpp_enc_frame->frame->side_data[i];
+        uint8_t *user_data = sd->data;
+        void *buf = NULL;
+
+        if (sd->type != AV_FRAME_DATA_SEI_UNREGISTERED)
+            continue;
+
+        if (sd->size < AV_UUID_LEN) {
+            av_log(avctx, AV_LOG_WARNING, "Invalid UDU SEI data: "
+                   "(%"SIZE_SPECIFIER" < UUID(%d-bytes)), skipping\n",
+                   sd->size, AV_UUID_LEN);
+            continue;
+        }
+
+        buf = av_fast_realloc(mpp_sei_set->datas,
+                              &mpp_sei_set->count,
+                              (sei_count + 1) * sizeof(*(mpp_sei_set->datas)));
+        if (!buf) {
+            av_log(avctx, AV_LOG_ERROR, "Failed to realloc UDU SEI buffer\n");
+            return AVERROR(ENOMEM);
+        } else {
+            mpp_sei_set->datas = (MppEncUserDataFull *)buf;
+
+            mpp_sei_set->datas[sei_count].len   = sd->size - AV_UUID_LEN;
+            mpp_sei_set->datas[sei_count].uuid  = (RK_U8 *)user_data;
+            mpp_sei_set->datas[sei_count].pdata = &user_data[AV_UUID_LEN];
+
+            mpp_sei_set->count = ++sei_count;
+        }
+    }
+
+    if (sei_count > 0) {
+        MppMeta mpp_meta = mpp_frame_get_meta(mpp_enc_frame->mpp_frame);
+        if (!mpp_meta) {
+            av_log(avctx, AV_LOG_ERROR, "Failed to get frame meta\n");
+            return AVERROR_EXTERNAL;
+        }
+        if ((ret = mpp_meta_set_ptr(mpp_meta, KEY_USER_DATAS,
+                                    &mpp_enc_frame->mpp_sei_set)) != MPP_OK) {
+            av_log(avctx, AV_LOG_ERROR, "Failed to set the UDU SEI datas ptr\n");
             return AVERROR_EXTERNAL;
         }
     }
@@ -600,6 +741,8 @@ static MPPEncFrame *rkmpp_submit_frame(AVCodecContext *avctx, AVFrame *frame)
         drm_frame = frame;
         mpp_enc_frame->frame = av_frame_clone(drm_frame);
     } else {
+        AVBufferRef *hw_frames_ctx = frame->hw_frames_ctx;
+
         drm_frame = av_frame_alloc();
         if (!drm_frame) {
             goto exit;
@@ -608,15 +751,19 @@ static MPPEncFrame *rkmpp_submit_frame(AVCodecContext *avctx, AVFrame *frame)
             av_log(avctx, AV_LOG_ERROR, "Cannot allocate an internal frame: %d\n", ret);
             goto exit;
         }
+        frame->hw_frames_ctx = NULL; /* clear hwfc to avoid HW -> HW transfer */
         if ((ret = av_hwframe_transfer_data(drm_frame, frame, 0)) < 0) {
             av_log(avctx, AV_LOG_ERROR, "av_hwframe_transfer_data failed: %d\n", ret);
+            frame->hw_frames_ctx = hw_frames_ctx;
             goto exit;
         }
         if ((ret = av_frame_copy_props(drm_frame, frame)) < 0) {
             av_log(avctx, AV_LOG_ERROR, "av_frame_copy_props failed: %d\n", ret);
+            frame->hw_frames_ctx = hw_frames_ctx;
             goto exit;
         }
         mpp_enc_frame->frame = drm_frame;
+        frame->hw_frames_ctx = hw_frames_ctx; /* restore hwfc */
     }
 
     drm_desc = (AVDRMFrameDescriptor *)drm_frame->data[0];
@@ -727,6 +874,14 @@ static MPPEncFrame *rkmpp_submit_frame(AVCodecContext *avctx, AVFrame *frame)
     }
     mpp_frame_set_buffer(mpp_frame, mpp_buf);
     mpp_frame_set_buf_size(mpp_frame, drm_desc->objects[0].size);
+
+    if (r->udu_sei &&
+        (avctx->codec_id == AV_CODEC_ID_H264 ||
+         avctx->codec_id == AV_CODEC_ID_HEVC)) {
+        ret = rkmpp_prepare_udu_sei_data(avctx, mpp_enc_frame);
+        if (ret < 0)
+            goto exit;
+    }
 
     return mpp_enc_frame;
 

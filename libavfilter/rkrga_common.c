@@ -258,78 +258,90 @@ static RGAFrame *get_free_frame(RGAFrame **list)
     return out;
 }
 
-static void set_colorspace_info(RGAFrameInfo *in_info, const AVFrame *in,
-                                RGAFrameInfo *out_info, AVFrame *out,
-                                int *color_space_mode)
+static void set_colorspace_info(RGAFrameInfo *in_info,
+                                enum AVColorSpace in_spc,
+                                enum AVColorRange in_rng,
+                                RGAFrameInfo *out_info,
+                                enum AVColorSpace *out_spc,
+                                enum AVColorRange *out_rng,
+                                int *color_space_mode,
+                                int is_rga2_used)
 {
-    if (!in_info || !out_info || !in || !out || !color_space_mode)
+    int rgb_in, rgb_out, out_mode = 0;
+
+    if (!in_info || !out_info || !color_space_mode)
         return;
 
-    *color_space_mode = 0;
+    rgb_in  = in_info->pix_desc->flags & AV_PIX_FMT_FLAG_RGB;
+    rgb_out = out_info->pix_desc->flags & AV_PIX_FMT_FLAG_RGB;
 
     /* rgb2yuv */
-    if ((in_info->pix_desc->flags & AV_PIX_FMT_FLAG_RGB) &&
-        !(out_info->pix_desc->flags & AV_PIX_FMT_FLAG_RGB)) {
+    if (rgb_in && !rgb_out) {
         /* rgb full -> yuv full/limit */
-        if (in->color_range == AVCOL_RANGE_JPEG) {
-            switch (in->colorspace) {
-            case AVCOL_SPC_BT709:
-                out->colorspace   = AVCOL_SPC_BT709;
-                *color_space_mode = 0xb << 8; /* rgb2yuv_709_limit */
-                break;
-            case AVCOL_SPC_BT470BG:
-                out->colorspace   = AVCOL_SPC_BT470BG;
-                *color_space_mode = 2 << 2; /* IM_RGB_TO_YUV_BT601_LIMIT */
-                break;
-            }
-        }
-        if (*color_space_mode) {
-            out->color_trc       = AVCOL_TRC_UNSPECIFIED;
-            out->color_primaries = AVCOL_PRI_UNSPECIFIED;
-            out->color_range     = AVCOL_RANGE_MPEG;
-        }
-    }
+        if (in_rng == AVCOL_RANGE_JPEG) {
+            if ((out_rng && *out_rng == AVCOL_RANGE_JPEG) ||
+                (out_spc && *out_spc == AVCOL_SPC_BT470BG)) {
+                if (out_spc)
+                    *out_spc = AVCOL_SPC_BT470BG;
 
+                if (out_rng && *out_rng == AVCOL_RANGE_JPEG)
+                    out_mode = 1 << 2; /* IM_RGB_TO_YUV_BT601_FULL */
+                else {
+                    if (out_rng)
+                        *out_rng = AVCOL_RANGE_MPEG;
+                    out_mode = 2 << 2; /* IM_RGB_TO_YUV_BT601_LIMIT */
+                }
+            } else {
+                if (out_spc)
+                    *out_spc = AVCOL_SPC_BT709;
+                if (out_rng)
+                    *out_rng = AVCOL_RANGE_MPEG;
+                out_mode = is_rga2_used ? (0xb << 8) /* rgb2yuv_709_limit */
+                                        : (3 << 2);  /* IM_RGB_TO_YUV_BT709_LIMIT */
+            }
+        }
+        if (out_mode)
+            *color_space_mode |= out_mode;
+    }
     /* yuv2rgb */
-    if (!(in_info->pix_desc->flags & AV_PIX_FMT_FLAG_RGB) &&
-        (out_info->pix_desc->flags & AV_PIX_FMT_FLAG_RGB)) {
+    else if (!rgb_in && rgb_out) {
         /* yuv full/limit -> rgb full */
-        switch (in->color_range) {
+        switch (in_rng) {
         case AVCOL_RANGE_MPEG:
-            if (in->colorspace == AVCOL_SPC_BT709) {
-                out->colorspace   = AVCOL_SPC_BT709;
-                *color_space_mode = 3 << 0; /* IM_YUV_TO_RGB_BT709_LIMIT */
-            }
-            if (in->colorspace == AVCOL_SPC_BT470BG) {
-                out->colorspace   = AVCOL_SPC_BT470BG;
-                *color_space_mode = 1 << 0; /* IM_YUV_TO_RGB_BT601_LIMIT */
-            }
+            if (in_spc == AVCOL_SPC_BT709)
+                out_mode = 3 << 0; /* IM_YUV_TO_RGB_BT709_LIMIT */
+            if (in_spc == AVCOL_SPC_BT470BG)
+                out_mode = 1 << 0; /* IM_YUV_TO_RGB_BT601_LIMIT */
             break;
         case AVCOL_RANGE_JPEG:
 #if 0
-            if (in->colorspace == AVCOL_SPC_BT709) {
-                out->colorspace   = AVCOL_SPC_BT709;
-                *color_space_mode = 0xc << 8; /* yuv2rgb_709_full */
-            }
+            if (in_spc == AVCOL_SPC_BT709)
+                out_mode = 0xc << 8; /* yuv2rgb_709_full */
+            if (in_spc == AVCOL_SPC_BT470BG)
 #endif
-            if (in->colorspace == AVCOL_SPC_BT470BG) {
-                out->colorspace   = AVCOL_SPC_BT470BG;
-                *color_space_mode = 2 << 0; /* IM_YUV_TO_RGB_BT601_FULL */
-            }
+                out_mode = 2 << 0; /* IM_YUV_TO_RGB_BT601_FULL */
             break;
         }
-        if (*color_space_mode) {
-            out->color_trc       = AVCOL_TRC_UNSPECIFIED;
-            out->color_primaries = AVCOL_PRI_UNSPECIFIED;
-            out->color_range     = AVCOL_RANGE_JPEG;
-        }
+        if (out_spc)
+            *out_spc = AVCOL_SPC_RGB;
+        if (out_rng)
+            *out_rng = AVCOL_RANGE_JPEG;
+        if (out_mode)
+            *color_space_mode |= out_mode;
+    }
+    /* passthrough */
+    else {
+        if (out_spc)
+            *out_spc = in_spc;
+        if (out_rng)
+            *out_rng = in_rng;
     }
 
     /* yuvj2yuv */
     if ((in_info->pix_fmt == AV_PIX_FMT_YUVJ420P ||
-         in_info->pix_fmt == AV_PIX_FMT_YUVJ422P) &&
-        !(out_info->pix_desc->flags & AV_PIX_FMT_FLAG_RGB)) {
-        out->color_range = AVCOL_RANGE_JPEG;
+         in_info->pix_fmt == AV_PIX_FMT_YUVJ422P) && !rgb_out) {
+        if (out_rng)
+            *out_rng = AVCOL_RANGE_JPEG;
     }
 }
 
@@ -391,7 +403,7 @@ static int verify_rga_frame_info_io_dynamic(AVFilterContext *avctx,
 }
 
 static RGAFrame *submit_frame(RKRGAContext *r, AVFilterLink *inlink,
-                              AVFrame *picref, int do_overlay, int pat_preproc)
+                              const AVFrame *picref, int do_overlay, int pat_preproc)
 {
     RGAFrame        *rga_frame;
     AVFilterContext *ctx = inlink->dst;
@@ -532,7 +544,7 @@ static RGAFrame *submit_frame(RKRGAContext *r, AVFilterLink *inlink,
 }
 
 static RGAFrame *query_frame(RKRGAContext *r, AVFilterLink *outlink,
-                             const AVFrame *in, int pat_preproc)
+                             const AVFrame *in, const AVFrame *picref_pat, int pat_preproc)
 {
     AVFilterContext *ctx = outlink->src;
     AVFilterLink *inlink = ctx->inputs[0];
@@ -611,8 +623,29 @@ static RGAFrame *query_frame(RKRGAContext *r, AVFilterLink *outlink,
     if (out_info->uncompact_10b_msb)
         info.is_10b_compact = info.is_10b_endian = 1;
 
-    if (!pat_preproc)
-        set_colorspace_info(in0_info, in, out_info, out_frame->frame, &info.color_space_mode);
+    if (!pat_preproc) {
+        int is_rga2_used = r->is_rga2_used || out_info->scheduler_core == (out_info->scheduler_core & 0xc);
+
+#ifdef RGA_NORMAL_DST_FULL_CSC_FIXUP
+        if (in1_info && picref_pat) {
+            enum AVColorSpace pat_colorspace = picref_pat->colorspace;
+            enum AVColorRange pat_color_range = picref_pat->color_range;
+            /* yuv2rgb src->pat */
+            set_colorspace_info(in0_info, in->colorspace, in->color_range,
+                                in1_info, &pat_colorspace, &pat_color_range,
+                                &info.color_space_mode, is_rga2_used);
+            /* rgb2yuv pat->dst */
+            set_colorspace_info(in1_info, pat_colorspace, pat_color_range,
+                                out_info, &out_frame->frame->colorspace, &out_frame->frame->color_range,
+                                &info.color_space_mode, is_rga2_used);
+        } else
+#endif
+        {
+            set_colorspace_info(in0_info, in->colorspace, in->color_range,
+                                out_info, &out_frame->frame->colorspace, &out_frame->frame->color_range,
+                                &info.color_space_mode, is_rga2_used);
+        }
+    }
 
     if (pat_preproc)
         rga_set_rect(&info.rect, in1_info->overlay_x, in1_info->overlay_y,
@@ -694,6 +727,7 @@ static av_cold int init_hwframes_ctx(AVFilterContext *avctx)
     AVHWFramesContext *hwfc_out;
     AVBufferRef       *hwfc_out_ref;
     AVHWDeviceContext *device_ctx;
+    AVBufferRef       *device_ref;
     AVRKMPPFramesContext *rkmpp_fc;
     int                ret;
 
@@ -701,12 +735,21 @@ static av_cold int init_hwframes_ctx(AVFilterContext *avctx)
         return AVERROR(EINVAL);
 
     hwfc_in = (AVHWFramesContext *)inlink->hw_frames_ctx->data;
-    device_ctx = (AVHWDeviceContext *)hwfc_in->device_ref->data;
+    device_ref = hwfc_in->device_ref;
+    device_ctx = (AVHWDeviceContext *)device_ref->data;
 
-    if (!device_ctx || device_ctx->type != AV_HWDEVICE_TYPE_RKMPP)
-        return AVERROR(EINVAL);
+    if (!device_ctx || device_ctx->type != AV_HWDEVICE_TYPE_RKMPP) {
+        if (avctx->hw_device_ctx) {
+            device_ref = avctx->hw_device_ctx;
+            device_ctx = (AVHWDeviceContext *)device_ref->data;
+        }
+        if (!device_ctx || device_ctx->type != AV_HWDEVICE_TYPE_RKMPP) {
+            av_log(avctx, AV_LOG_ERROR, "No RKMPP hardware context provided\n");
+            return AVERROR(EINVAL);
+        }
+    }
 
-    hwfc_out_ref = av_hwframe_ctx_alloc(hwfc_in->device_ref);
+    hwfc_out_ref = av_hwframe_ctx_alloc(device_ref);
     if (!hwfc_out_ref)
         return AVERROR(ENOMEM);
 
@@ -741,6 +784,7 @@ static av_cold int init_pat_preproc_hwframes_ctx(AVFilterContext *avctx)
     AVHWFramesContext *hwfc_pat;
     AVBufferRef       *hwfc_pat_ref;
     AVHWDeviceContext *device_ctx0;
+    AVBufferRef       *device_ref0;
     int                ret;
 
     if (!inlink0->hw_frames_ctx || !inlink1->hw_frames_ctx)
@@ -748,12 +792,21 @@ static av_cold int init_pat_preproc_hwframes_ctx(AVFilterContext *avctx)
 
     hwfc_in0 = (AVHWFramesContext *)inlink0->hw_frames_ctx->data;
     hwfc_in1 = (AVHWFramesContext *)inlink1->hw_frames_ctx->data;
-    device_ctx0 = (AVHWDeviceContext *)hwfc_in0->device_ref->data;
+    device_ref0 = hwfc_in0->device_ref;
+    device_ctx0 = (AVHWDeviceContext *)device_ref0->data;
 
-    if (!device_ctx0 || device_ctx0->type != AV_HWDEVICE_TYPE_RKMPP)
-        return AVERROR(EINVAL);
+    if (!device_ctx0 || device_ctx0->type != AV_HWDEVICE_TYPE_RKMPP) {
+        if (avctx->hw_device_ctx) {
+            device_ref0 = avctx->hw_device_ctx;
+            device_ctx0 = (AVHWDeviceContext *)device_ref0->data;
+        }
+        if (!device_ctx0 || device_ctx0->type != AV_HWDEVICE_TYPE_RKMPP) {
+            av_log(avctx, AV_LOG_ERROR, "No RKMPP hardware context provided\n");
+            return AVERROR(EINVAL);
+        }
+    }
 
-    hwfc_pat_ref = av_hwframe_ctx_alloc(hwfc_in0->device_ref);
+    hwfc_pat_ref = av_hwframe_ctx_alloc(device_ref0);
     if (!hwfc_pat_ref)
         return AVERROR(ENOMEM);
 
@@ -1094,15 +1147,18 @@ av_cold int ff_rkrga_init(AVFilterContext *avctx, RKRGAParam *param)
         }
     }
     if (avctx->nb_inputs > 1) {
-        const int premultiplied_alpha = r->in_rga_frame_infos[1].pix_desc->flags & AV_PIX_FMT_FLAG_ALPHA;
+        int need_premultiply = 0;
+
+        if (r->in_rga_frame_infos[1].pix_desc->flags & AV_PIX_FMT_FLAG_ALPHA)
+            need_premultiply = param->in_alpha_format == 0;
 
         /* IM_ALPHA_BLEND_DST_OVER */
         if (param->in_global_alpha > 0 && param->in_global_alpha < 0xff) {
-            r->in_rga_frame_infos[0].blend_mode = premultiplied_alpha ? (0x4 | (1 << 12)) : 0x4;
+            r->in_rga_frame_infos[0].blend_mode = need_premultiply ? (0x4 | (1 << 12)) : 0x4;
             r->in_rga_frame_infos[0].blend_mode |= (param->in_global_alpha & 0xff) << 16; /* fg_global_alpha */
             r->in_rga_frame_infos[0].blend_mode |= 0xff << 24;                            /* bg_global_alpha */
         } else
-            r->in_rga_frame_infos[0].blend_mode = premultiplied_alpha ? 0x504 : 0x501;
+            r->in_rga_frame_infos[0].blend_mode = need_premultiply ? 0x504 : 0x501;
 
         r->in_rga_frame_infos[1].overlay_x = FFMAX(param->overlay_x, 0);
         r->in_rga_frame_infos[1].overlay_y = FFMAX(param->overlay_y, 0);
@@ -1181,6 +1237,9 @@ av_cold int ff_rkrga_close(AVFilterContext *avctx)
 
     clear_frame_list(&r->pat_preproc_frame_list);
 
+    if (r->in_rga_frame_infos)
+        av_freep(&r->in_rga_frame_infos);
+
     av_fifo_freep2(&r->async_fifo);
 
     av_buffer_unref(&r->pat_preproc_hwframes_ctx);
@@ -1200,8 +1259,8 @@ static int call_rkrga_blit(AVFilterContext *avctx,
 
 #define PRINT_RGA_INFO(ctx, info, name) do { \
     if (info && name) \
-        av_log(ctx, AV_LOG_DEBUG, "RGA %s | fd:%d mmu:%d rd_mode:%d | x:%d y:%d w:%d h:%d ws:%d hs:%d fmt:0x%x\n", \
-               name, info->fd, info->mmuFlag, (info->rd_mode >> 1), info->rect.xoffset, info->rect.yoffset, \
+        av_log(ctx, AV_LOG_DEBUG, "RGA %s | fd:%d mmu:%d rd:%d csc:%d | x:%d y:%d w:%d h:%d ws:%d hs:%d fmt:0x%x\n", \
+               name, info->fd, info->mmuFlag, (info->rd_mode >> 1), info->color_space_mode, info->rect.xoffset, info->rect.yoffset, \
                info->rect.width, info->rect.height, info->rect.wstride, info->rect.hstride, (info->rect.format >> 8)); \
 } while (0)
 
@@ -1267,7 +1326,7 @@ int ff_rkrga_filter_frame(RKRGAContext *r,
     }
 
     /* DST */
-    if (!(dst_frame = query_frame(r, outlink, src_frame->frame, 0))) {
+    if (!(dst_frame = query_frame(r, outlink, src_frame->frame, picref_pat, 0))) {
         av_log(ctx, AV_LOG_ERROR, "Failed to query an output frame\n");
         return AVERROR(ENOMEM);
     }
@@ -1290,7 +1349,7 @@ int ff_rkrga_filter_frame(RKRGAContext *r,
                        FF_INLINK_IDX(inlink_pat));
                 return AVERROR(ENOMEM);
             }
-            if (!(pat_out = query_frame(r, outlink, picref_pat, 1))) {
+            if (!(pat_out = query_frame(r, outlink, picref_pat, NULL, 1))) {
                 av_log(ctx, AV_LOG_ERROR, "Failed to query an output frame\n");
                 return AVERROR(ENOMEM);
             }
