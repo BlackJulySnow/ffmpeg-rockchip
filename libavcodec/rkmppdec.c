@@ -901,6 +901,7 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
             mpp_frame_deinit(&mpp_frame);
             return rkmpp_get_frame(avctx, frame, MPP_TIMEOUT_MAX);
         }
+        ret = AVERROR(EAGAIN);
         goto exit;
     } else {
 export:
@@ -1209,7 +1210,7 @@ exit:
     return ret;
 }
 
-static void rkmpp_decode_flush(AVCodecContext *avctx)
+static av_cold void rkmpp_decode_flush(AVCodecContext *avctx)
 {
     RKMPPDecContext *r = avctx->priv_data;
     int ret;

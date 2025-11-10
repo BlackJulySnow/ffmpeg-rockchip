@@ -33,6 +33,7 @@
 #include "encode.h"
 #include "hwconfig.h"
 #include "internal.h"
+#include "packet_internal.h"
 
 #include "libavutil/hwcontext_rkmpp.h"
 #include "libavutil/opt.h"
@@ -53,7 +54,7 @@ typedef struct MPPEncFrame {
 } MPPEncFrame;
 
 typedef struct RKMPPEncContext {
-    AVClass           *class;
+    const AVClass     *class;
 
     MppApi            *mapi;
     MppCtx             mctx;
@@ -83,6 +84,9 @@ typedef struct RKMPPEncContext {
     int                udu_sei;
     int                prefix_mode;
     int                chroma_fmt;
+    int                intra_refresh;
+    int                refresh_mode;
+    int                refresh_num;
 } RKMPPEncContext;
 
 static const AVRational mpp_tb = { 1, 1000000 };
@@ -113,6 +117,14 @@ static const AVRational mpp_tb = { 1, 1000000 };
             { .i64 = -1 }, -1, 51, VE, "qp_max_i" }, \
     { "qp_min_i", "Set the min QP value for I frame", OFFSET(qp_min_i), AV_OPT_TYPE_INT, \
             { .i64 = -1 }, -1, 51, VE, "qp_min_i" }, \
+    { "intra_refresh", "Use Intra Refresh instead of IDR frames", OFFSET(intra_refresh), AV_OPT_TYPE_BOOL, \
+            { .i64 = 0 }, 0, 1, VE, "intra_refresh" }, \
+    { "refresh_mode", "Set the Intra Refresh mode", OFFSET(refresh_mode), AV_OPT_TYPE_INT, \
+            { .i64 = MPP_ENC_RC_INTRA_REFRESH_ROW }, MPP_ENC_RC_INTRA_REFRESH_ROW, MPP_ENC_RC_INTRA_REFRESH_COL, VE, "refresh_mode" }, \
+        { "row", "Refresh by MB row",    0, AV_OPT_TYPE_CONST, { .i64 = MPP_ENC_RC_INTRA_REFRESH_ROW }, 0, 0, VE, .unit = "refresh_mode" }, \
+        { "col", "Refresh by MB column", 0, AV_OPT_TYPE_CONST, { .i64 = MPP_ENC_RC_INTRA_REFRESH_COL }, 0, 0, VE, .unit = "refresh_mode" }, \
+    { "refresh_num", "Set how many MB rows or columns refresh each time", OFFSET(refresh_num), AV_OPT_TYPE_INT, \
+            { .i64 = 1 }, 1, INT_MAX, VE, "refresh_num" }, \
 
 static const AVOption h264_options[] = {
     RKMPP_ENC_COMMON_OPTS
